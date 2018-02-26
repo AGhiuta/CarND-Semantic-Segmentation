@@ -1,0 +1,291 @@
+import os.path
+import tensorflow as tf
+import helper
+import warnings
+from distutils.version import LooseVersion
+import project_tests as tests
+
+from moviepy.editor import VideoFileClip
+import scipy.misc
+import numpy as np
+
+import sys
+
+# Check TensorFlow Version
+assert LooseVersion(tf.__version__) >= LooseVersion('1.0'), 'Please use TensorFlow version 1.0 or newer.  You are using {}'.format(tf.__version__)
+print('TensorFlow Version: {}'.format(tf.__version__))
+
+# Check for a GPU
+if not tf.test.gpu_device_name():
+    warnings.warn('No GPU found. Please use a GPU to train your neural network.')
+else:
+    print('Default GPU Device: {}'.format(tf.test.gpu_device_name()))
+
+
+train_model = False
+process_video = True
+load_model = True
+save_model = False
+
+# process image parameters
+image_shape = (0, 0)
+sess = tf.Session()
+keep_prob = tf.placeholder(tf.float32)
+loggits = tf.placeholder(tf.int32, [None, None, None, 2])
+input_image = tf.placeholder(tf.int32, [None, None, 3])
+
+def load_vgg(sess, vgg_path):
+    """
+    Load Pretrained VGG Model into TensorFlow.
+    :param sess: TensorFlow Session
+    :param vgg_path: Path to vgg folder, containing "variables/" and "saved_model.pb"
+    :return: Tuple of Tensors from VGG model (image_input, keep_prob, layer3_out, layer4_out, layer7_out)
+    """
+    # TODO: Implement function
+    #   Use tf.saved_model.loader.load to load the model and weights
+    vgg_tag = 'vgg16'
+
+    tf.saved_model.loader.load(sess, [vgg_tag], vgg_path)
+
+    vgg_input_tensor_name = 'image_input:0'
+    vgg_keep_prob_tensor_name = 'keep_prob:0'
+    vgg_layer3_out_tensor_name = 'layer3_out:0'
+    vgg_layer4_out_tensor_name = 'layer4_out:0'
+    vgg_layer7_out_tensor_name = 'layer7_out:0'
+
+    graph = tf.get_default_graph()
+    w1 = graph.get_tensor_by_name(vgg_input_tensor_name)
+    kp = graph.get_tensor_by_name(vgg_keep_prob_tensor_name)
+    w3 = graph.get_tensor_by_name(vgg_layer3_out_tensor_name)
+    w4 = graph.get_tensor_by_name(vgg_layer4_out_tensor_name)
+    w7 = graph.get_tensor_by_name(vgg_layer7_out_tensor_name)
+
+    return w1, kp, w3, w4, w7
+tests.test_load_vgg(load_vgg, tf)
+
+
+def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
+    """
+    Create the layers for a fully convolutional network.  Build skip-layers using the vgg layers.
+    :param vgg_layer3_out: TF Tensor for VGG Layer 3 output
+    :param vgg_layer4_out: TF Tensor for VGG Layer 4 output
+    :param vgg_layer7_out: TF Tensor for VGG Layer 7 output
+    :param num_classes: Number of classes to classify
+    :return: The Tensor for the last layer of output
+    """
+    # TODO: Implement function
+    
+    # The outputs of pooling layers 3 and 4 are scaled before they are fed
+    # into the 1x1 convolutions
+    vgg_layer3_out_scaled = tf.multiply(vgg_layer3_out, 0.0001)
+    conv_1x1_lay3 = tf.layers.conv2d(inputs=vgg_layer3_out_scaled,
+                                     filters=num_classes,
+                                     kernel_size=(1, 1),
+                                     strides=(1, 1),
+                                     padding='same',
+                                     kernel_initializer=tf.truncated_normal_initializer(stddev=1e-3),
+                                     kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+
+    vgg_layer4_out_scaled = tf.multiply(vgg_layer4_out, 0.01)
+    conv_1x1_lay4 = tf.layers.conv2d(inputs=vgg_layer4_out_scaled,
+                                     filters=num_classes,
+                                     kernel_size=(1, 1),
+                                     strides=(1, 1),
+                                     padding='same',
+                                     kernel_initializer=tf.truncated_normal_initializer(stddev=1e-3),
+                                     kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+
+    conv_1x1_lay7 = tf.layers.conv2d(inputs=vgg_layer7_out,
+                                     filters=num_classes,
+                                     kernel_size=(1, 1),
+                                     strides=(1, 1),
+                                     padding='same',
+                                     kernel_initializer=tf.truncated_normal_initializer(stddev=1e-3),
+                                     kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+
+    # scale up by x2
+    output = tf.layers.conv2d_transpose(inputs=conv_1x1_lay7,
+                                        filters=num_classes,
+                                        kernel_size=(4, 4),
+                                        strides=(2, 2),
+                                        padding='same',
+                                        kernel_initializer=tf.truncated_normal_initializer(stddev=1e-2),
+                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+
+    # first skip layer
+    output = tf.add(output, conv_1x1_lay4)
+
+    # scale up by x2
+    output = tf.layers.conv2d_transpose(inputs=output,
+                                        filters=num_classes,
+                                        kernel_size=(4, 4),
+                                        strides=(2, 2),
+                                        padding='same',
+                                        kernel_initializer=tf.truncated_normal_initializer(stddev=1e-2),
+                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+
+    # second skip layer
+    output = tf.add(output, conv_1x1_lay3)
+
+    # scaled up by x8 to get original image size
+    output = tf.layers.conv2d_transpose(inputs=output,
+                                        filters=num_classes,
+                                        kernel_size=(16, 16),
+                                        strides=(8, 8),
+                                        padding='same',
+                                        kernel_initializer=tf.truncated_normal_initializer(stddev=1e-2),
+                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+
+    return output
+tests.test_layers(layers)
+
+def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
+    """
+    Build the TensorFLow loss and optimizer operations.
+    :param nn_last_layer: TF Tensor of the last layer in the neural network
+    :param correct_label: TF Placeholder for the correct label image
+    :param learning_rate: TF Placeholder for the learning rate
+    :param num_classes: Number of classes to classify
+    :return: Tuple of (logits, train_op, cross_entropy_loss)
+    """
+    # TODO: Implement function
+    logits = tf.reshape(nn_last_layer, (-1, num_classes))
+    correct_label = tf.reshape(correct_label, (-1, num_classes))
+
+    cross_entropy_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits,
+                                                                                labels=correct_label))
+
+    # compute the regularization loss
+    try:
+        regularization_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+        regularization_loss = tf.add_n(regularization_losses)
+
+        # compute the total loss
+        total_loss = tf.add(cross_entropy_loss, regularization_loss)
+    except:
+        total_loss = cross_entropy_loss
+
+    optimizer = tf.train.AdamOptimizer(learning_rate).minimize(total_loss)
+
+    return logits, optimizer, total_loss
+tests.test_optimize(optimize)
+
+def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_loss, input_image,
+             correct_label, keep_prob, learning_rate):
+    """
+    Train neural network and print out the loss during training.
+    :param sess: TF Session
+    :param epochs: Number of epochs
+    :param batch_size: Batch size
+    :param get_batches_fn: Function to get batches of training data.  Call using get_batches_fn(batch_size)
+    :param train_op: TF Operation to train the neural network
+    :param cross_entropy_loss: TF Tensor for the amount of loss
+    :param input_image: TF Placeholder for input images
+    :param correct_label: TF Placeholder for label images
+    :param keep_prob: TF Placeholder for dropout keep probability
+    :param learning_rate: TF Placeholder for learning rate
+    """
+    # TODO: Implement function
+    for epoch in range(epochs):
+        for batch, (image, label) in enumerate(get_batches_fn(batch_size)):
+            feed_dict = {input_image: image, correct_label: label, keep_prob: 0.5, learning_rate: 1e-4}
+            _, loss = sess.run([train_op, cross_entropy_loss], feed_dict=feed_dict)
+            print('Epoch {} Batch {} Loss {}'.format(epoch, batch, loss), flush=True)
+
+    pass
+tests.test_train_nn(train_nn)
+
+
+def process_image(image):
+    # resize the image
+    orig_image_shape = image.shape[:2]
+    image = scipy.misc.imresize(image, image_shape)
+
+    net_output = sess.run([tf.nn.softmax(logits)],
+            {keep_prob: 1.0, input_image: [image]})
+
+    label_idx = np.argmax(net_output, axis=2)
+
+    value_fill = label_idx.copy()
+    value_fill.fill(1)
+
+    segmentation = np.equal(label_idx, value_fill).reshape(image_shape[0], image_shape[1], 1)
+    mask = np.dot(segmentation, np.array([[0, 255, 0, 127]]))
+
+    image = scipy.misc.imresize(image, orig_image_shape)
+    mask = scipy.misc.imresize(mask, orig_image_shape)
+
+    road_im = scipy.misc.toimage(image)
+    mask = scipy.misc.toimage(mask, mode='RGBA')
+    road_im.paste(mask, box=None, mask=mask)
+
+    return np.array(road_im)
+
+def run():
+    global image_shape, logits, sess, keep_prob, input_image
+
+    num_classes = 2
+    image_shape = (160, 576)
+    data_dir = './data'
+    runs_dir = './runs'
+    tests.test_for_kitti_dataset(data_dir)
+
+    # Download pretrained vgg model
+    helper.maybe_download_pretrained_vgg(data_dir)
+
+    # OPTIONAL: Train and Inference on the cityscapes dataset instead of the Kitti dataset.
+    # You'll need a GPU with at least 10 teraFLOPS to train on.
+    #  https://www.cityscapes-dataset.com/
+
+    with tf.Session() as sess:
+        # Path to vgg model
+        vgg_path = os.path.join(data_dir, 'vgg')
+        # Create function to get batches
+        get_batches_fn = helper.gen_batch_function(os.path.join(data_dir, 'data_road/training'), image_shape)
+
+        # OPTIONAL: Augment Images for better results
+        #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
+
+        # TODO: Build NN using load_vgg, layers, and optimize function
+        epochs = 30
+        batch_size = 8 # actual batch size is 16, as each image is also horizontally flipped
+        learning_rate = tf.placeholder(tf.float32)
+        correct_label = tf.placeholder(tf.int32, [None, None, None, num_classes])
+
+        input_image, keep_prob, layer3_out, layer4_out, layer7_out = load_vgg(sess, vgg_path)
+        layer_output = layers(layer3_out, layer4_out, layer7_out, num_classes)
+        logits, optimizer, total_loss = optimize(layer_output, correct_label, learning_rate, num_classes)
+
+        # TODO: Train NN using the train_nn function
+        saver = tf.train.Saver()
+        sess.run(tf.global_variables_initializer())
+
+        if load_model:
+            checkpoint = tf.train.get_checkpoint_state('./saved_models')
+            try:
+                saver.restore(sess, checkpoint.model_checkpoint_path)
+                print('Successfully loaded {}'.format(checkpoint.model_checkpoint_path))
+            except:
+                print('Could not find network weights')
+
+        if train_model:
+            train_nn(sess, epochs, batch_size, get_batches_fn, optimizer, total_loss, input_image,
+                     correct_label, keep_prob, learning_rate)
+
+        # TODO: Save inference data using helper.save_inference_samples
+        helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image)
+        
+        if save_model:
+            saver.save(sess, './saved_models/model')
+
+        # OPTIONAL: Apply the trained model to a video
+        if process_video:
+            out_video = './videos/street_drive_road_segm2.mp4'
+            in_video = './videos/street_drive.mp4'
+
+            clip = VideoFileClip(in_video)
+            video_clip = clip.fl_image(process_image)
+            video_clip.write_videofile(out_video, audio=False)
+
+if __name__ == '__main__':
+    run()
