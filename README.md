@@ -15,7 +15,7 @@ Here are some of the results:
 ![sample][image2]
 ![sample][image3]
 
-Also, a demo video can be found here: [project_video]([video1])
+Also, a demo video can be found here: [project video](./videos/street_drive_road_segm.mp4)
 
 ### Setup
 ##### Frameworks and Packages
