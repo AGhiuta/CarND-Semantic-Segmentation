@@ -15,7 +15,7 @@ Here are some of the results:
 ![sample][image2]
 ![sample][image3]
 
-Also, a demo video can be found here: [![project_video][video1]](project video)
+Also, a demo video can be found here: [project_video]([video1])
 
 ### Setup
 ##### Frameworks and Packages
